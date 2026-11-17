@@ -14,6 +14,10 @@ import { searchCommand } from '../src/commands/handlers/searchCommand.js';
 import { scheduleCommand, exportCommand } from '../src/commands/handlers/scheduleCommand.js';
 import { CommandRouter } from '../src/commands/commandRouter.js';
 import { MessageController } from '../src/controllers/messageController.js';
+import {
+  GoogleSheetsRepository,
+  normalizeSheetDate,
+} from '../src/repositories/googleSheetsRepository.js';
 
 /** Repository palsu di memori — pengganti GoogleSheetsRepository untuk unit test. */
 class FakeRepository {
@@ -392,4 +396,46 @@ test('Budget per Jenis & Kategori, Pencarian (/cari), Export CSV (/export), dan 
   assert.equal(dueResult2.monthlySent, false);
   assert.equal(dueResult2.weeklySent, false);
   assert.equal(sentMessages.length, 2);
+});
+
+test('GoogleSheetsRepository: menangani serial number tanggal UNFORMATTED_VALUE (46343 -> 2026-11-17) & sheet tanpa header', async () => {
+  assert.equal(normalizeSheetDate(46343), '2026-11-17');
+  assert.equal(normalizeSheetDate('17/11/2026'), '2026-11-17');
+  assert.equal(normalizeSheetDate('2026-11-17'), '2026-11-17');
+
+  // Simulasikan Google Sheets yang mengembalikan serial number 46343 untuk 2026-11-17
+  // serta baris pertama langsung berisi transaksi (tanpa baris header ID|Date|...)
+  const fakeSheetsApi = {
+    spreadsheets: {
+      values: {
+        get: async () => ({
+          data: {
+            values: [
+              [
+                'TX-20261117-7SWE',
+                46343,
+                'Bensin Pertamax',
+                'Transportasi',
+                50000,
+                'via Suami',
+                'Kebutuhan',
+                'Suami',
+              ],
+            ],
+          },
+        }),
+      },
+    },
+  };
+
+  const sheetRepo = new GoogleSheetsRepository({ sheetsApi: fakeSheetsApi });
+  const foundToday = await sheetRepo.findByDate('2026-11-17');
+  assert.equal(foundToday.length, 1);
+  assert.equal(foundToday[0].id, 'TX-20261117-7SWE');
+  assert.equal(foundToday[0].date, '2026-11-17');
+  assert.equal(foundToday[0].item, 'Bensin Pertamax');
+  assert.equal(foundToday[0].amount, 50000);
+
+  const foundMonth = await sheetRepo.findByMonth('2026-11');
+  assert.equal(foundMonth.length, 1);
 });

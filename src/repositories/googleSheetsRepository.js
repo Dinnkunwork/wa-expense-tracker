@@ -96,6 +96,7 @@ export class GoogleSheetsRepository {
         spreadsheetId,
         range: `${sheetNames.transactions}!A:H`,
         valueRenderOption: 'UNFORMATTED_VALUE',
+        dateTimeRenderOption: 'FORMATTED_STRING',
       });
       const rows = res.data.values || [];
       if (this.#transactionsCacheTtlMs > 0) {
@@ -117,26 +118,23 @@ export class GoogleSheetsRepository {
 
   async getAllTransactions() {
     const rows = await this.#getAllRows();
-    return rows
-      .slice(1)
+    return stripTransactionHeader(rows)
       .filter((row) => row && row[0])
       .map(rowToTransaction);
   }
 
   async findByDate(dateStr) {
     const rows = await this.#getAllRows();
-    return rows
-      .slice(1) // buang header
-      .filter((row) => String(row[1] || '') === dateStr)
+    return stripTransactionHeader(rows)
+      .filter((row) => normalizeSheetDate(row[1]) === dateStr)
       .map(rowToTransaction);
   }
 
   async findByDateRange(startDate, endDate) {
     const rows = await this.#getAllRows();
-    return rows
-      .slice(1)
+    return stripTransactionHeader(rows)
       .filter((row) => {
-        const d = String(row[1] || '');
+        const d = normalizeSheetDate(row[1]);
         return d >= startDate && d <= endDate;
       })
       .map(rowToTransaction);
@@ -145,23 +143,27 @@ export class GoogleSheetsRepository {
   async findByMonth(monthStr) {
     // monthStr format: YYYY-MM
     const rows = await this.#getAllRows();
-    return rows
-      .slice(1)
-      .filter((row) => String(row[1] || '').startsWith(monthStr))
+    return stripTransactionHeader(rows)
+      .filter((row) => normalizeSheetDate(row[1]).startsWith(monthStr))
       .map(rowToTransaction);
   }
 
   async findById(id) {
     const rows = await this.#getAllRows();
     const targetId = String(id).trim().toUpperCase();
-    const index = rows.findIndex((row) => String(row[0] || '').trim().toUpperCase() === targetId);
-    if (index <= 0) return null; // index 0 adalah header
-    return { rowNumber: index + 1, transaction: rowToTransaction(rows[index]) }; // 1-indexed termasuk header
+    const index = rows.findIndex(
+      (row, idx) =>
+        !(idx === 0 && isTransactionHeaderRow(row)) &&
+        String(row?.[0] || '').trim().toUpperCase() === targetId
+    );
+    if (index < 0) return null;
+    return { rowNumber: index + 1, transaction: rowToTransaction(rows[index]) }; // 1-indexed di Google Sheets
   }
 
   async findLastTransaction({ sender } = {}) {
     const rows = await this.#getAllRows();
-    for (let i = rows.length - 1; i >= 1; i -= 1) {
+    const minIdx = isTransactionHeaderRow(rows[0]) ? 1 : 0;
+    for (let i = rows.length - 1; i >= minIdx; i -= 1) {
       if (!rows[i] || !rows[i][0]) continue;
       const tx = rowToTransaction(rows[i]);
       if (sender && tx.sender && tx.sender.toLowerCase() !== sender.toLowerCase()) {
@@ -429,6 +431,53 @@ export class GoogleSheetsRepository {
   }
 }
 
+function isTransactionHeaderRow(row) {
+  if (!row || !row[0]) return false;
+  const firstCol = String(row[0]).trim().toLowerCase();
+  return firstCol === 'id' || firstCol === 'id transaksi';
+}
+
+function stripTransactionHeader(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  return isTransactionHeaderRow(rows[0]) ? rows.slice(1) : rows;
+}
+
+/**
+ * Normalisasi nilai tanggal dari Google Sheets menjadi format ISO `YYYY-MM-DD`.
+ * Menangani:
+ *   1. Serial number tanggal Google Sheets/Excel (mis. 46343 -> "2026-11-17")
+ *      yang muncul ketika `valueRenderOption: 'UNFORMATTED_VALUE'` dipakai.
+ *   2. String ISO `YYYY-MM-DD` atau `YYYY/MM/DD`.
+ *   3. String tanggal format lokal `DD/MM/YYYY` atau `DD-MM-YYYY`.
+ */
+export function normalizeSheetDate(val) {
+  if (val === null || val === undefined || val === '') return '';
+
+  if (
+    typeof val === 'number' ||
+    (/^\d+(\.\d+)?$/.test(String(val).trim()) && Number(val) > 20000 && Number(val) < 100000)
+  ) {
+    const serial = Math.floor(Number(val));
+    const utcMs = Date.UTC(1899, 11, 30) + serial * 86_400_000;
+    return new Date(utcMs).toISOString().slice(0, 10);
+  }
+
+  const str = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+
+  let m = str.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (m) {
+    return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  }
+
+  m = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (m) {
+    return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  }
+
+  return str;
+}
+
 function parseRawAmount(val) {
   if (typeof val === 'number') return val;
   if (!val) return 0;
@@ -447,7 +496,7 @@ function rowToTransaction([id, date, item, category, amount, note, type, sender]
   const resolvedSender = sender ? String(sender).trim() : extractSenderFromNote(cleanNote);
   return {
     id: String(id || ''),
-    date: String(date || ''),
+    date: normalizeSheetDate(date),
     item: String(item || ''),
     category: category ? String(category) : null,
     amount: parseRawAmount(amount),
