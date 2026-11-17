@@ -398,13 +398,14 @@ test('Budget per Jenis & Kategori, Pencarian (/cari), Export CSV (/export), dan 
   assert.equal(sentMessages.length, 2);
 });
 
-test('GoogleSheetsRepository: menangani serial number tanggal UNFORMATTED_VALUE (46343 -> 2026-11-17) & sheet tanpa header', async () => {
+test('GoogleSheetsRepository: menangani serial number tanggal UNFORMATTED_VALUE (46343 -> 2026-11-17), format "Selasa, 17 November 2026", & nominal "Rp20.000"', async () => {
   assert.equal(normalizeSheetDate(46343), '2026-11-17');
+  assert.equal(normalizeSheetDate('Selasa, 17 November 2026'), '2026-11-17');
   assert.equal(normalizeSheetDate('17/11/2026'), '2026-11-17');
   assert.equal(normalizeSheetDate('2026-11-17'), '2026-11-17');
 
-  // Simulasikan Google Sheets yang mengembalikan serial number 46343 untuk 2026-11-17
-  // serta baris pertama langsung berisi transaksi (tanpa baris header ID|Date|...)
+  // Simulasikan baris persis seperti di sheet user:
+  // TX-20261117-05VF | Selasa, 17 November 2026 | Pertalite | Lainnya | Rp20.000 | via Suami | Kebutuhan | Suami
   const fakeSheetsApi = {
     spreadsheets: {
       values: {
@@ -421,6 +422,16 @@ test('GoogleSheetsRepository: menangani serial number tanggal UNFORMATTED_VALUE 
                 'Kebutuhan',
                 'Suami',
               ],
+              [
+                'TX-20261117-05VF',
+                'Selasa, 17 November 2026',
+                'Pertalite',
+                'Lainnya',
+                'Rp20.000',
+                'via Suami',
+                'Kebutuhan',
+                'Suami',
+              ],
             ],
           },
         }),
@@ -430,12 +441,14 @@ test('GoogleSheetsRepository: menangani serial number tanggal UNFORMATTED_VALUE 
 
   const sheetRepo = new GoogleSheetsRepository({ sheetsApi: fakeSheetsApi });
   const foundToday = await sheetRepo.findByDate('2026-11-17');
-  assert.equal(foundToday.length, 1);
+  assert.equal(foundToday.length, 2);
   assert.equal(foundToday[0].id, 'TX-20261117-7SWE');
-  assert.equal(foundToday[0].date, '2026-11-17');
-  assert.equal(foundToday[0].item, 'Bensin Pertamax');
   assert.equal(foundToday[0].amount, 50000);
+  assert.equal(foundToday[1].id, 'TX-20261117-05VF');
+  assert.equal(foundToday[1].date, '2026-11-17');
+  assert.equal(foundToday[1].item, 'Pertalite');
+  assert.equal(foundToday[1].amount, 20000);
 
   const foundMonth = await sheetRepo.findByMonth('2026-11');
-  assert.equal(foundMonth.length, 1);
+  assert.equal(foundMonth.length, 2);
 });

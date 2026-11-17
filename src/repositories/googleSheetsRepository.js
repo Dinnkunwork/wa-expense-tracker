@@ -96,7 +96,7 @@ export class GoogleSheetsRepository {
         spreadsheetId,
         range: `${sheetNames.transactions}!A:H`,
         valueRenderOption: 'UNFORMATTED_VALUE',
-        dateTimeRenderOption: 'FORMATTED_STRING',
+        dateTimeRenderOption: 'SERIAL_NUMBER',
       });
       const rows = res.data.values || [];
       if (this.#transactionsCacheTtlMs > 0) {
@@ -126,7 +126,7 @@ export class GoogleSheetsRepository {
   async findByDate(dateStr) {
     const rows = await this.#getAllRows();
     return stripTransactionHeader(rows)
-      .filter((row) => normalizeSheetDate(row[1]) === dateStr)
+      .filter((row) => normalizeSheetDate(row[1], row[0]) === dateStr)
       .map(rowToTransaction);
   }
 
@@ -134,7 +134,7 @@ export class GoogleSheetsRepository {
     const rows = await this.#getAllRows();
     return stripTransactionHeader(rows)
       .filter((row) => {
-        const d = normalizeSheetDate(row[1]);
+        const d = normalizeSheetDate(row[1], row[0]);
         return d >= startDate && d <= endDate;
       })
       .map(rowToTransaction);
@@ -144,7 +144,7 @@ export class GoogleSheetsRepository {
     // monthStr format: YYYY-MM
     const rows = await this.#getAllRows();
     return stripTransactionHeader(rows)
-      .filter((row) => normalizeSheetDate(row[1]).startsWith(monthStr))
+      .filter((row) => normalizeSheetDate(row[1], row[0]).startsWith(monthStr))
       .map(rowToTransaction);
   }
 
@@ -442,46 +442,92 @@ function stripTransactionHeader(rows) {
   return isTransactionHeaderRow(rows[0]) ? rows.slice(1) : rows;
 }
 
+const MONTH_NAME_MAP = {
+  januari: '01', january: '01', jan: '01',
+  februari: '02', february: '02', feb: '02',
+  maret: '03', march: '03', mar: '03',
+  april: '04', apr: '04',
+  mei: '05', may: '05',
+  juni: '06', june: '06', jun: '06',
+  juli: '07', july: '07', jul: '07',
+  agustus: '08', august: '08', agu: '08', ags: '08', aug: '08',
+  september: '09', sep: '09', sept: '09',
+  oktober: '10', october: '10', okt: '10', oct: '10',
+  november: '11', nov: '11', nopember: '11', nop: '11',
+  desember: '12', december: '12', des: '12', dec: '12',
+};
+
 /**
  * Normalisasi nilai tanggal dari Google Sheets menjadi format ISO `YYYY-MM-DD`.
  * Menangani:
  *   1. Serial number tanggal Google Sheets/Excel (mis. 46343 -> "2026-11-17")
- *      yang muncul ketika `valueRenderOption: 'UNFORMATTED_VALUE'` dipakai.
- *   2. String ISO `YYYY-MM-DD` atau `YYYY/MM/DD`.
- *   3. String tanggal format lokal `DD/MM/YYYY` atau `DD-MM-YYYY`.
+ *   2. String ISO `YYYY-MM-DD` atau `YYYY/MM/DD`
+ *   3. String tanggal format lokal `DD/MM/YYYY` atau `DD-MM-YYYY`
+ *   4. String tanggal panjang Bahasa Indonesia / Inggris (mis. "Selasa, 17 November 2026")
+ *   5. Fallback ekstraksi tanggal dari ID transaksi (`TX-YYYYMMDD-XXXX`)
  */
-export function normalizeSheetDate(val) {
-  if (val === null || val === undefined || val === '') return '';
+export function normalizeSheetDate(val, fallbackId = '') {
+  if (val !== null && val !== undefined && val !== '') {
+    if (
+      typeof val === 'number' ||
+      (/^\d+(\.\d+)?$/.test(String(val).trim()) && Number(val) > 20000 && Number(val) < 100000)
+    ) {
+      const serial = Math.floor(Number(val));
+      const utcMs = Date.UTC(1899, 11, 30) + serial * 86_400_000;
+      return new Date(utcMs).toISOString().slice(0, 10);
+    }
 
-  if (
-    typeof val === 'number' ||
-    (/^\d+(\.\d+)?$/.test(String(val).trim()) && Number(val) > 20000 && Number(val) < 100000)
-  ) {
-    const serial = Math.floor(Number(val));
-    const utcMs = Date.UTC(1899, 11, 30) + serial * 86_400_000;
-    return new Date(utcMs).toISOString().slice(0, 10);
+    const str = String(val).trim();
+
+    let m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+
+    m = str.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b/);
+    if (m) {
+      return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    }
+
+    m = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b/);
+    if (m) {
+      return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    }
+
+    // Format "Selasa, 17 November 2026", "17 November 2026", "17 Nov 2026"
+    m = str.match(/(\d{1,2})[\s/-]+([a-zA-Z]+)[\s,/-]+(\d{4})/);
+    if (m) {
+      const monthNum = MONTH_NAME_MAP[m[2].toLowerCase()];
+      if (monthNum) {
+        return `${m[3]}-${monthNum}-${m[1].padStart(2, '0')}`;
+      }
+    }
+
+    // Format "November 17, 2026"
+    m = str.match(/([a-zA-Z]+)[\s-]+(\d{1,2}),?\s+(\d{4})/);
+    if (m) {
+      const monthNum = MONTH_NAME_MAP[m[1].toLowerCase()];
+      if (monthNum) {
+        return `${m[3]}-${monthNum}-${m[2].padStart(2, '0')}`;
+      }
+    }
   }
 
-  const str = String(val).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
-
-  let m = str.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
-  if (m) {
-    return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  const idMatch = String(fallbackId || '').match(/^TX-(\d{4})(\d{2})(\d{2})-/i);
+  if (idMatch) {
+    return `${idMatch[1]}-${idMatch[2]}-${idMatch[3]}`;
   }
 
-  m = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
-  if (m) {
-    return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  }
-
-  return str;
+  return val !== null && val !== undefined ? String(val).trim() : '';
 }
 
 function parseRawAmount(val) {
   if (typeof val === 'number') return val;
   if (!val) return 0;
-  const cleaned = String(val).replace(/[^0-9.-]/g, '');
+  let str = String(val).trim();
+  // Jika mengandung pemisah ribuan titik ala Rupiah (mis. "Rp20.000" atau "1.250.000"), buang titiknya
+  if (/\d\.\d{3}(\b|$)/.test(str)) {
+    str = str.replace(/\./g, '').replace(/,/g, '.');
+  }
+  const cleaned = str.replace(/[^0-9.-]/g, '');
   return Number(cleaned) || 0;
 }
 
@@ -496,7 +542,7 @@ function rowToTransaction([id, date, item, category, amount, note, type, sender]
   const resolvedSender = sender ? String(sender).trim() : extractSenderFromNote(cleanNote);
   return {
     id: String(id || ''),
-    date: normalizeSheetDate(date),
+    date: normalizeSheetDate(date, id),
     item: String(item || ''),
     category: category ? String(category) : null,
     amount: parseRawAmount(amount),
